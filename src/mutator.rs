@@ -2,6 +2,8 @@
 use std::{cmp, fs};
 use std::vec::Vec;
 
+use std::collections::BTreeSet;
+
 use rand::prelude::*;
 
 #[derive(Debug, Clone)]
@@ -14,60 +16,63 @@ enum MutationMethod {
 }
 
 pub struct Mutator {
-    core_samples:    Vec<Sample>, // Reservoir of original samples
-    corpus:          Vec<Sample>, // Samples with coverage data
-    mutation_pool:   Vec<Sample>, // Set of samples for future mutation
-    samples:         Vec<Sample>, // Mutated samples; ready to be fed to engine
+    corpus:    Vec<Sample>, // corpus 
+    samples:   Vec<Sample>, // latest mutation round
+
+    // Trace
+    trace_list: BTreeSet<Vec<u64>>,
 
     // associated rng
     rng: rand::prelude::ThreadRng,
 }
 
+// Simplified mutator
 impl Mutator {
     // Create new mutator and initialize all the fields
     pub fn new() -> Self {
         Mutator {
-            core_samples:   vec!(),
             corpus:         vec!(),
-            mutation_pool:  vec!(),
             samples:        vec!(),
+
+            trace_list:     BTreeSet::new(),
 
             rng: thread_rng()
         }
     }
 
-    // Consume data from file as a fresh sample
-    pub fn feed(&mut self, data: Vec<u8>) {
-        self.core_samples.push(Sample::new(data));
+    // Consume initial corpus; move them to samples first.
+    pub fn consume(&mut self, corpus: &Vec<Vec<u8>>) {
+        for entry in corpus {
+            self.samples.push(Sample::new(entry));
+        }
+    }
+
+    // Consume sample with added trace 
+    pub fn update(&mut self, samples: &Vec<Sample>) {
+        for sample in samples {
+            match &sample.trace {
+                Some(trace) => {
+                    if !self.trace_list.contains(trace) {
+                        println!("[-] New coverage for input {:?} [{:?}]", sample.data, sample.method);
+                        self.corpus.push(sample.clone());
+                        self.trace_list.insert(trace.clone());
+                    }
+                },
+                None => {
+                    println!("[!] missing trace info ...");
+                }
+            }
+        }
+        self.mutate()
     }
 
     // Mutate mutation pool to create a set of new samples
     fn mutate(&mut self) {
-        if self.mutation_pool.len() == 0 {
-            self.fit_function();
-        }
-
-        for sample in &mut self.mutation_pool {
+        for sample in &mut self.corpus {
             for _ in 0..100 { //completely arbitraty number
                 &self.samples.push(sample.mutate(&mut self.rng));
             }
         }
-    }
-
-    fn fit_function(&mut self) {
-        // Add samples from unmodified pool
-        for sample in &mut self.core_samples {
-            self.mutation_pool.push(sample.clone())
-        }
-
-        // Select elements from corpus for future mutation
-
-        // Backfill to 100
-
-        // Update trace info
-        
-        // clean the corpus and mutation_pool
-        self.corpus.clear();
     }
 }
 
@@ -75,11 +80,6 @@ impl Iterator for Mutator {
     type Item = Sample;
 
     fn next(&mut self) -> Option<Sample> {
-
-        if self.samples.len() == 0 {
-            self.mutate();
-        }
-
         self.samples.pop()
     }
 }
@@ -90,22 +90,32 @@ pub struct Sample {
     version: u32,
     data: Vec<u8>,
     method: MutationMethod,
-
+    trace: Option<Vec<u64>>,
 }
 
+
 impl Sample {
-    fn new(content: Vec<u8>) -> Self {
-        Sample {version:1, data: content, method: MutationMethod::Raw }
+    fn new(content: &Vec<u8>) -> Self {
+        Sample {
+            version:1, 
+            data: content.clone(), 
+            method: MutationMethod::Raw, 
+            trace: None 
+        }
     }
 
     pub fn materialize_sample(&self, filename: &str) {
       fs::write(filename, &self.data).expect("error saving file");
     }
 
+    pub fn add_trace(&mut self, trace: Vec<u64>) {
+        self.trace = Some(trace)
+    }
+
     fn mutate(&mut self, rng: &mut ThreadRng) -> Sample {
 
-        let strategy: u32 = rng.gen_range(0, 3);
-        let index: usize = rng.gen_range(0, self.data.len());
+        let strategy: u32 = rng.gen_range(0..=3);
+        let index: usize = rng.gen_range(0..self.data.len());
 
         match strategy {
             0 => self.bit_flip(rng, index),
@@ -121,6 +131,7 @@ impl Sample {
             version: &self.version + 1,
             data: self.data.to_vec(),
             method: MutationMethod::Raw,
+            trace: None,
         }
     }
 
@@ -133,6 +144,7 @@ impl Sample {
             version: &self.version + 1,
             data: bytecode,
             method: MutationMethod::BitFlip,
+            trace: None,
         }
     }
 
@@ -146,6 +158,7 @@ impl Sample {
             version: &self.version + 1,
             data: bytecode,
             method: MutationMethod::ByteFlip,
+            trace: None,
         }
     }
 
@@ -153,14 +166,16 @@ impl Sample {
         let mut bytecode = self.data.to_vec();
 
         // Insert random block of data in range of 1-8 bytes
-        for i in 0..rng.gen_range(1, 8) {
-            bytecode.insert(idx+i, rng.gen::<u8>());
-        }
+        // for i in 0..rng.gen_range(1..8) {
+        //     bytecode.insert(idx+i, rng.gen::<u8>());
+        // }
+        bytecode.insert(idx, rng.gen::<u8>());
 
         Sample {
             version: &self.version + 1,
             data: bytecode,
             method: MutationMethod::InsertBlock,
+            trace: None,
         }
     }
 
@@ -168,7 +183,7 @@ impl Sample {
         let mut bytecode = self.data.to_vec();
 
         // Remove random block of data in range of 1-8 bytes
-        let upper_bound = cmp::min(rng.gen_range(1, 8), bytecode.len() - idx);
+        let upper_bound = cmp::min(rng.gen_range(1..8), bytecode.len() - idx);
 
         for _ in 0..upper_bound {
             bytecode.remove(idx);
@@ -178,6 +193,7 @@ impl Sample {
             version: &self.version + 1,
             data: bytecode,
             method: MutationMethod::RemoveBlock,
+            trace: None,
         }
     }
 }

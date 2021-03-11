@@ -1,16 +1,16 @@
-use std::env;
-use std::fs;
-use std::path::Path;
-use std::io::{BufRead, BufReader};
-use std::time::Instant;
+use clap::{App, Arg};
 
 use std::collections::HashMap;
+use std::fs;
+use std::time::Instant;
 
 mod child;
 mod parent;
 mod mutator;
+mod config;
 
-const FILE: &str = "sample.jpg";
+
+const FILE: &str = "input_file";
 
 #[derive(Default)]
 struct Statistics {
@@ -19,116 +19,74 @@ struct Statistics {
 
     // Number of crashes
     crashes: u64,
-
-}
-
-struct Corpus {
-    files: Vec<Vec<u8>>,
-}
-
-impl Corpus {
-    fn new() -> Self {
-        Corpus {
-            files: vec!(),
-        }
-    }
-}
-
-fn read_corpus(entry: &Path) -> Option<Corpus> {
-    let mut corpus = Corpus::new();
-
-    if entry.is_dir() {
-        for f in fs::read_dir(entry).unwrap() {
-            let data = fs::read(f.unwrap().path()).unwrap();
-            corpus.files.push(data.to_vec())
-        }
-
-    } else {
-        corpus.files.push(fs::read(entry).unwrap())
-    }
-
-    Some(corpus)
-}
-
-fn parse_breakpoint_map(filename: &Path) -> Option<Vec<u64>> {
-    let mut bp_map: Vec<u64> = vec!();
-
-    if filename.is_file() {
-        let fh = fs::File::open(filename).unwrap();
-        let reader = BufReader::new(fh);
-
-        for line in reader.lines() {
-            match line {
-                Ok(line) => {
-                    if !line.trim().is_empty() {
-                        bp_map.push(u64::from_str_radix(line.trim_start_matches("0x"), 16).expect("Failed parsing"));
-                    }
-                },
-                Err(_) => {
-                    println!("Failed reading line");
-                }
-            }
-        }
-
-        Some(bp_map)
-    } else {
-        None
-    }
 }
 
 fn main() {
-    // Extract two arguments
-    let prog_name = env::args().nth(1).expect("Program name not provided");
-    let corpus =  env::args().nth(2).expect("Filename not provided");
-    let breakpoint_map = env::args().nth(3).expect("Breakpoint map not provided");
+    // Extract arguments via clap
+    let options = App::new("Rufus2 fuzzer")
+        .version("1.0")
+        .author("@carste1n")
+        .about("Simple fuzzer in Rust")
+        .arg(Arg::with_name("prog_name")
+            .short("p")
+            .long("prog")
+            .takes_value(true)
+            .help("Name of the program to execute")
+            .required(true))
+        .arg(Arg::with_name("corpus")
+            .short("c")
+            .long("corpus")
+            .takes_value(true)
+            .help("File corpus to be consumed by the fuzzer")
+            .required(true))
+        .arg(Arg::with_name("bpmap")
+            .short("b")
+            .long("bpmap")
+            .takes_value(true)
+            .help("List of breakpoints to set")
+            .required(true))
+        .get_matches();
+
+    println!("[#] Generating runtime config.");
+    let runtime_config = config::generate_runtime_config(options);
 
     // Stats
     let mut stats = Statistics::default();
 
     // Mutation engine
+    println!("[#] Initializing mutation engine");
     let mut mutator = mutator::Mutator::new();
-
-    // Consume corpus of files
-    println!("[+] Loading original file");
-    let corpus = read_corpus(Path::new(&corpus)).expect("Failed to obtain corpus");
-
-    println!("[+] Parsing breakpoin map");
-    let bp_map = parse_breakpoint_map(Path::new(&breakpoint_map))
-                    .expect("Failed to parse breakpoint map");
 
     // Hash map for storing original bytes where we inserted breakpoints
     let mut bp_mapping: HashMap<u64, i64> = HashMap::new();
 
     // Feed it to mutator
-    for sample in corpus.files {
-        mutator.feed(sample);
-    }
+    println!("[+] Feeding corpus to mutator");
+    mutator.consume(&runtime_config.corpus);
+
+    // Runtime container for executed samples
+    let mut sample_pool: Vec<mutator::Sample> = vec!();
 
     // Timer for stats
     let start = Instant::now();
 
-    // Enter loop
-    loop {
-        for sample in &mut mutator {
+    // MAIN FUZZ LOOP
+   loop {
+        for mut sample in &mut mutator {
             // Save sample
             sample.materialize_sample(FILE);
-
-            let child_pid = child::run_child(&prog_name, &FILE);
-
-            // Pre-set all breakpoints for coverage tracking
-            for bp in &bp_map {
-                bp_mapping.insert(*bp, parent::set_breakpoint(child_pid, *bp));
-            }
+            let child_pid = child::run_child(&runtime_config, &mut bp_mapping, FILE);
 
             stats.fuzz_cases += 1;
             match parent::run_parent(child_pid, &bp_mapping) {
-                parent::ParentStatus::Clean => {
-                    // just handle stats
+                parent::ParentStatus::Clean(trace) => {
+                    sample.add_trace(trace);
+                    sample_pool.push(sample);
                 }
 
                 parent::ParentStatus::Crash(rip) => {
                     stats.crashes += 1;
-                    let crash_filename = format!("crash_{}.jpg", rip);
+                    let crash_filename = format!("crash_{}", rip);
                     fs::copy(FILE, crash_filename)
                         .expect("Failed to save crash file");
                 }
@@ -141,5 +99,8 @@ fn main() {
                         stats.fuzz_cases as f64/ elapsed, stats.crashes);
             }
         }
+
+        // Send back all the sample with traces to the mutator
+        mutator.update(&sample_pool)
     }
 }
