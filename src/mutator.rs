@@ -66,7 +66,7 @@ impl Mutator {
         self.mutate()
     }
 
-    // Mutate mutation pool to create a set of new samples
+    // Mutate corpus to create a set of new samples
     fn mutate(&mut self) {
         for sample in &mut self.corpus {
             for _ in 0..100 { //completely arbitraty number
@@ -85,7 +85,7 @@ impl Iterator for Mutator {
 }
 
 // Individual sample
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Sample {
     version: u32,
     data: Vec<u8>,
@@ -115,13 +115,12 @@ impl Sample {
     fn mutate(&mut self, rng: &mut ThreadRng) -> Sample {
 
         let strategy: u32 = rng.gen_range(0..=3);
-        let index: usize = rng.gen_range(0..self.data.len());
 
         match strategy {
-            0 => self.bit_flip(rng, index),
-            1 => self.byte_flip(rng, index),
-            2 => self.insert_block(rng, index),
-            3 => self.remove_block(rng, index),
+            0 => self.bit_flip(rng),
+            1 => self.byte_flip(rng),
+            2 => self.insert_block(rng),
+            3 => self.remove_block(rng),
             _ => self.raw(),
         }
     }
@@ -135,10 +134,12 @@ impl Sample {
         }
     }
 
-    fn bit_flip(&self, rng: &mut ThreadRng, idx: usize) -> Sample {
+    fn bit_flip(&self, rng: &mut ThreadRng) -> Sample {
         let mut bytecode = self.data.to_vec();
+
+        let index: usize = rng.gen_range(0..self.data.len());
         let b = [1, 2, 4, 8,16, 32, 64, 128].choose(rng).unwrap();
-        bytecode[idx] ^= b;
+        bytecode[index] ^= b;
 
         Sample {
             version: &self.version + 1,
@@ -148,11 +149,12 @@ impl Sample {
         }
     }
 
-    fn byte_flip(&self, rng: &mut rand::prelude::ThreadRng, idx: usize) -> Sample {
+    fn byte_flip(&self, rng: &mut rand::prelude::ThreadRng) -> Sample {
         let mut bytecode = self.data.to_vec();
 
+        let index: usize = rng.gen_range(0..self.data.len());
         let b: u8 = rng.gen::<u8>();
-        bytecode[idx] = b;
+        bytecode[index] = b;
 
         Sample {
             version: &self.version + 1,
@@ -162,14 +164,16 @@ impl Sample {
         }
     }
 
-    fn insert_block(&self, rng: &mut rand::prelude::ThreadRng, idx: usize) -> Sample {
+    fn insert_block(&self, rng: &mut rand::prelude::ThreadRng) -> Sample {
         let mut bytecode = self.data.to_vec();
 
         // Insert random block of data in range of 1-8 bytes
-        // for i in 0..rng.gen_range(1..8) {
-        //     bytecode.insert(idx+i, rng.gen::<u8>());
-        // }
-        bytecode.insert(idx, rng.gen::<u8>());
+        // We need separate index for inserting because to append elements
+        // at the end of the array we need index of last element plus one
+        let index: usize = rng.gen_range(0..=self.data.len());
+        for i in 0..rng.gen_range(1..8) {
+            bytecode.insert(index + i, rng.gen::<u8>());
+        }
 
         Sample {
             version: &self.version + 1,
@@ -179,14 +183,15 @@ impl Sample {
         }
     }
 
-    fn remove_block(&self, rng: &mut rand::prelude::ThreadRng, idx: usize) -> Sample {
+    fn remove_block(&self, rng: &mut rand::prelude::ThreadRng) -> Sample {
         let mut bytecode = self.data.to_vec();
 
         // Remove random block of data in range of 1-8 bytes
-        let upper_bound = cmp::min(rng.gen_range(1..8), bytecode.len() - idx);
+        let index: usize = rng.gen_range(0..self.data.len());
+        let limit = cmp::min(rng.gen_range(1..=8), bytecode.len() - index);
 
-        for _ in 0..upper_bound {
-            bytecode.remove(idx);
+        for _ in 0..limit {
+            bytecode.remove(index);
         }
 
         Sample {

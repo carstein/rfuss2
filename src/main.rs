@@ -50,9 +50,6 @@ fn main() {
     println!("[#] Generating runtime config.");
     let runtime_config = config::generate_runtime_config(options);
 
-    // Stats
-    let mut stats = Statistics::default();
-
     // Mutation engine
     println!("[#] Initializing mutation engine");
     let mut mutator = mutator::Mutator::new();
@@ -68,10 +65,12 @@ fn main() {
     let mut sample_pool: Vec<mutator::Sample> = vec!();
 
     // Timer for stats
+    let mut stats = Statistics::default();
     let start = Instant::now();
+    let mut go = true;
 
     // MAIN FUZZ LOOP
-   loop {
+   while go {
         for mut sample in &mut mutator {
             // Save sample
             sample.materialize_sample(FILE);
@@ -86,21 +85,21 @@ fn main() {
 
                 parent::ParentStatus::Crash(rip) => {
                     stats.crashes += 1;
+                    println!("[!] Crash for input {:?}", sample);
                     let crash_filename = format!("crash_{}", rip);
                     fs::copy(FILE, crash_filename)
                         .expect("Failed to save crash file");
+                    go = false;
                 }
-            }
-
-            if stats.fuzz_cases % 1000 == 0 {
-                let elapsed = start.elapsed().as_secs_f64();
-                print!("[{:10.6}] cases {:10} | fcps  {:10.2} | crashes {:10}\n",
-                        elapsed, stats.fuzz_cases, 
-                        stats.fuzz_cases as f64/ elapsed, stats.crashes);
             }
         }
 
         // Send back all the sample with traces to the mutator
-        mutator.update(&sample_pool)
+        mutator.update(&sample_pool);
     }
+
+    let elapsed = start.elapsed().as_secs_f64();
+    print!("[{:10.2}] cases {:10} | fcps  {:10.2} | crashes {:10}\n",
+            elapsed, stats.fuzz_cases, 
+            stats.fuzz_cases as f64/ elapsed, stats.crashes);
 }
